@@ -6,6 +6,7 @@ public class Llm {
 
     private final ModelRegistry modelRegistry;
     private final AliasManager aliasManager;
+    private final LogManager logManager;
 
     public Llm() {
         this(new ModelRegistry(new Config()), new AliasManager());
@@ -14,6 +15,16 @@ public class Llm {
     public Llm(ModelRegistry modelRegistry, AliasManager aliasManager) {
         this.modelRegistry = modelRegistry;
         this.aliasManager = aliasManager;
+        
+        Config config = modelRegistry.getConfig();
+        String logType = config.get("log.type").orElse("none");
+        String logPath = config.get("log.path").orElse(System.getProperty("user.home") + "/.llm/logs/conversations");
+        
+        if (!"none".equalsIgnoreCase(logType)) {
+            this.logManager = new LogManager(logType, logPath);
+        } else {
+            this.logManager = null;
+        }
     }
 
     public LlmChatModel getModel(String modelName) throws IOException {
@@ -38,5 +49,13 @@ public class Llm {
 
     public AliasManager getAliasManager() {
         return aliasManager;
+    }
+
+    public LogManager getLogManager() {
+        return logManager;
+    }
+
+    public boolean isLoggingEnabled() {
+        return logManager != null;
     }
 }

@@ -17,7 +17,7 @@ import java.util.concurrent.Callable;
 
 @Command(name = "llm", mixinStandardHelpOptions = true, version = "llm-java 1.0",
         description = "Access Large Language Models from the command-line.",
-        subcommands = {Cli.EmbedCommand.class, Cli.AliasesCommand.class})
+        subcommands = {Cli.EmbedCommand.class, Cli.AliasesCommand.class, Cli.LogCommand.class})
 public class Cli implements Callable<Integer> {
 
     @Parameters(index = "0", description = "The prompt to execute.", arity = "0..1")
@@ -102,7 +102,26 @@ public class Cli implements Callable<Integer> {
         }
 
         LlmRequest llmRequest = new LlmRequest(finalPrompt, schema, tools);
+        
+        long startTime = System.currentTimeMillis();
         LlmResponse llmResponse = chatModel.chat(llmRequest);
+        long durationMs = System.currentTimeMillis() - startTime;
+        
+        // Log the conversation if logging is enabled
+        if (llm.isLoggingEnabled()) {
+            llm.getLogManager().logConversation(
+                model,
+                finalPrompt,
+                llmResponse.text(),
+                llmResponse.promptTokens(),
+                llmResponse.responseTokens(),
+                llmResponse.totalTokens(),
+                durationMs,
+                schema,
+                tools,
+                null
+            );
+        }
 
         if (schema != null) {
             try {
@@ -122,7 +141,6 @@ public class Cli implements Callable<Integer> {
 
     @Command(name = "embed", description = "Generate an embedding for a given text.")
     static class EmbedCommand implements Callable<Integer> {
-
         @Parameters(index = "0", description = "The text to embed.")
         private String text;
 
@@ -212,13 +230,119 @@ public class Cli implements Callable<Integer> {
     }
 
 
+    @Command(name = "log", description = "Manage conversation logs.",
+            subcommands = {LogCommand.ListCommand.class, LogCommand.ViewCommand.class})
+    static class LogCommand {
+        private final Llm llm;
+
+        public LogCommand(Llm llm) {
+            this.llm = llm;
+        }
+
+        @Command(name = "list", description = "List conversation logs.")
+        static class ListCommand implements Callable<Integer> {
+            @Option(names = {"-l", "--limit"}, description = "Number of conversations to show", defaultValue = "10")
+            private int limit;
+
+            @Option(names = {"-o", "--offset"}, description = "Number of conversations to skip", defaultValue = "0")
+            private int offset;
+
+            private final Llm llm;
+
+            public ListCommand(Llm llm) {
+                this.llm = llm;
+            }
+
+            @Override
+            public Integer call() {
+                if (!llm.isLoggingEnabled()) {
+                    System.err.println("Logging is not enabled. Set LLM_LOG_TYPE environment variable to 'jsonl' or 'h2'.");
+                    return 1;
+                }
+
+                List<Conversation> conversations = llm.getLogManager().getConversations(limit, offset);
+                if (conversations.isEmpty()) {
+                    System.out.println("No conversations found.");
+                    return 0;
+                }
+
+                System.out.printf("%-5s %-20s %-30s %-50s%n", "ID", "Timestamp", "Model", "Prompt");
+                System.out.println("-".repeat(105));
+                
+                for (Conversation conv : conversations) {
+                    String prompt = conv.getPrompt();
+                    if (prompt.length() > 47) {
+                        prompt = prompt.substring(0, 44) + "...";
+                    }
+                    System.out.printf("%-5d %-20s %-30s %-50s%n", 
+                            conv.getId(), 
+                            conv.getTimestamp().toString().substring(0, 19), 
+                            conv.getModel(), 
+                            prompt);
+                }
+                
+                return 0;
+            }
+        }
+
+        @Command(name = "view", description = "View a specific conversation.")
+        static class ViewCommand implements Callable<Integer> {
+            @Parameters(index = "0", description = "The conversation ID to view")
+            private long id;
+
+            private final Llm llm;
+
+            public ViewCommand(Llm llm) {
+                this.llm = llm;
+            }
+
+            @Override
+            public Integer call() {
+                if (!llm.isLoggingEnabled()) {
+                    System.err.println("Logging is not enabled. Set LLM_LOG_TYPE environment variable to 'jsonl' or 'h2'.");
+                    return 1;
+                }
+
+                Conversation conv = llm.getLogManager().getConversation(id);
+                if (conv == null) {
+                    System.err.println("Conversation with ID " + id + " not found.");
+                    return 1;
+                }
+
+                System.out.println("Conversation ID: " + conv.getId());
+                System.out.println("Timestamp: " + conv.getTimestamp());
+                System.out.println("Model: " + conv.getModel());
+                System.out.println("Duration: " + conv.getDurationMs() + "ms");
+                System.out.println("Tokens: " + conv.getPromptTokens() + " prompt + " + conv.getResponseTokens() + " response = " + conv.getTotalTokens() + " total");
+                if (conv.getSchema() != null) {
+                    System.out.println("Schema: " + conv.getSchema());
+                }
+                System.out.println();
+                System.out.println("Prompt:");
+                System.out.println(conv.getPrompt());
+                System.out.println();
+                System.out.println("Response:");
+                System.out.println(conv.getResponse());
+                
+                return 0;
+            }
+        }
+    }
+
     public static void main(String[] args) {
         Llm llm = new Llm();
         TemplateManager templateManager = new TemplateManager();
         FragmentManager fragmentManager = new FragmentManager();
 
-        CommandLine commandLine = new CommandLine(new Cli(llm, templateManager, fragmentManager), new AppFactory(llm, templateManager, fragmentManager));
+        CommandLine commandLine = new CommandLine(new Cli(llm, templateManager, fragmentManager), 
+                new AppFactory(llm, templateManager, fragmentManager));
         int exitCode = commandLine.execute(args);
+        
+        // Close log manager if it exists
+        if (llm.getLogManager() != null) {
+            llm.getLogManager().close();
+        }
+        
         System.exit(exitCode);
     }
 
@@ -227,7 +351,6 @@ public class Cli implements Callable<Integer> {
         private final TemplateManager templateManager;
         private final FragmentManager fragmentManager;
 
-
         public AppFactory(Llm llm, TemplateManager templateManager, FragmentManager fragmentManager) {
             this.llm = llm;
             this.templateManager = templateManager;
@@ -235,6 +358,7 @@ public class Cli implements Callable<Integer> {
         }
 
         @Override
+        @SuppressWarnings("unchecked")
         public <K> K create(Class<K> cls) throws Exception {
             if (cls == Cli.class) {
                 return (K) new Cli(llm, templateManager, fragmentManager);
@@ -248,6 +372,12 @@ public class Cli implements Callable<Integer> {
                 return (K) new AliasesCommand.SetCommand(llm);
             } else if (cls == AliasesCommand.RemoveCommand.class) {
                 return (K) new AliasesCommand.RemoveCommand(llm);
+            } else if (cls == LogCommand.class) {
+                return (K) new LogCommand(llm);
+            } else if (cls == LogCommand.ListCommand.class) {
+                return (K) new LogCommand.ListCommand(llm);
+            } else if (cls == LogCommand.ViewCommand.class) {
+                return (K) new LogCommand.ViewCommand(llm);
             } else {
                 return cls.getDeclaredConstructor().newInstance();
             }

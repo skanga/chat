@@ -68,7 +68,7 @@ public class ModelRegistry {
         return chatModelFactories.keySet().toArray(new String[0]);
     }
 
-    public String[] getAvailableEmbeddingProviders() {
-        return embeddingModelFactories.keySet().toArray(new String[0]);
+    public Config getConfig() {
+        return config;
     }
 }

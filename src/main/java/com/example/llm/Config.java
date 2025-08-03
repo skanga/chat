@@ -18,6 +18,11 @@ public class Config {
         config.put("huggingface.api.key", System.getenv("HF_API_KEY"));
         config.put("openai.api.key", System.getenv("OPENAI_API_KEY"));
         config.put("openrouter.api.key", System.getenv("OPENROUTER_API_KEY"));
+        
+        // Logging configuration
+        config.put("log.type", System.getenv().getOrDefault("LLM_LOG_TYPE", "none"));
+        config.put("log.path", System.getenv().getOrDefault("LLM_LOG_PATH", 
+            System.getProperty("user.home") + "/.llm/logs/conversations"));
     }
 
     /**
