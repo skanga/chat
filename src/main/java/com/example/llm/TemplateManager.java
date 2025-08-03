@@ -13,17 +13,23 @@ public class TemplateManager {
     private final File templatesDir;
 
     public TemplateManager() {
-        String userHome = System.getProperty("user.home");
-        this.templatesDir = new File(userHome, ".llm/templates");
-        if (!templatesDir.exists()) {
-            templatesDir.mkdirs();
-        }
+        this(getDefaultTemplatesDir());
     }
+
     public TemplateManager(File templatesDir) {
-        this.templatesDir = templatesDir;
-        if (!templatesDir.exists()) {
-            templatesDir.mkdirs();
+        this.templatesDir = ensureDirectoryExists(templatesDir);
+    }
+
+    private static File getDefaultTemplatesDir() {
+        String userHome = System.getProperty("user.home");
+        return new File(userHome, ".llm/templates");
+    }
+
+    private static File ensureDirectoryExists(File directory) {
+        if (!directory.exists()) {
+            directory.mkdirs();
         }
+        return directory;
     }
 
     public Template loadTemplate(String name) throws IOException {

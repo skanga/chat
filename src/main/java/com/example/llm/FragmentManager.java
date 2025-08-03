@@ -9,18 +9,23 @@ public class FragmentManager {
     private final File fragmentsDir;
 
     public FragmentManager() {
-        String userHome = System.getProperty("user.home");
-        this.fragmentsDir = new File(userHome, ".llm/fragments");
-        if (!fragmentsDir.exists()) {
-            fragmentsDir.mkdirs();
-        }
+        this(getDefaultFragmentsDir());
     }
 
     public FragmentManager(File fragmentsDir) {
-        this.fragmentsDir = fragmentsDir;
-        if (!fragmentsDir.exists()) {
-            fragmentsDir.mkdirs();
+        this.fragmentsDir = ensureDirectoryExists(fragmentsDir);
+    }
+
+    private static File getDefaultFragmentsDir() {
+        String userHome = System.getProperty("user.home");
+        return new File(userHome, ".llm/fragments");
+    }
+
+    private static File ensureDirectoryExists(File directory) {
+        if (!directory.exists()) {
+            directory.mkdirs();
         }
+        return directory;
     }
 
     public String loadFragment(String name) throws IOException {
