@@ -10,12 +10,11 @@ import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
 
 public abstract class BaseChatModelWrapper implements LlmChatModel {
-
-    private final ChatModel model;
+    private final ChatModel chatModel;
     private final StreamingChatModel streamingModel;
 
-    public BaseChatModelWrapper(ChatModel model, StreamingChatModel streamingModel) {
-        this.model = model;
+    public BaseChatModelWrapper(ChatModel chatModel, StreamingChatModel streamingModel) {
+        this.chatModel = chatModel;
         this.streamingModel = streamingModel;
     }
 
@@ -23,7 +22,7 @@ public abstract class BaseChatModelWrapper implements LlmChatModel {
     public LlmResponse chat(LlmRequest llmRequest) {
         UserMessage userMessage = UserMessage.from(llmRequest.prompt());
         try {
-            ChatResponse response = model.chat(userMessage);
+            ChatResponse response = chatModel.chat(userMessage);
             return new LlmResponse(response.aiMessage().text());
         } catch (Exception e) {
             throw new RuntimeException("Error calling API: " + e.getMessage(), e);
@@ -31,9 +30,9 @@ public abstract class BaseChatModelWrapper implements LlmChatModel {
     }
 
     @Override
-    public void streamChat(LlmRequest llmRequest, StreamingChatResponseHandler handler) {
+    public void streamChat(LlmRequest llmRequest, StreamingChatResponseHandler responseHandler) {
         try {
-            streamingModel.chat(llmRequest.prompt(), handler);
+            streamingModel.chat(llmRequest.prompt(), responseHandler);
         } catch (Exception e) {
             throw new RuntimeException("Error calling API: " + e.getMessage(), e);
         }

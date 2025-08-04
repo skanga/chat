@@ -1,6 +1,5 @@
 package com.example.llm;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
@@ -17,9 +16,8 @@ import java.util.concurrent.Callable;
 
 @Command(name = "llm", mixinStandardHelpOptions = true, version = "llm-java 1.0",
         description = "Access Large Language Models from the command-line.",
-        subcommands = {Cli.EmbedCommand.class, Cli.AliasesCommand.class, Cli.LogCommand.class})
+        subcommands = {Cli.EmbedCommand.class, Cli.AliasesCommand.class, Cli.LogCommand.class, Cli.ChatCommand.class})
 public class Cli implements Callable<Integer> {
-
     @Parameters(index = "0", description = "The prompt to execute.", arity = "0..1")
     private String prompt;
 
@@ -40,6 +38,12 @@ public class Cli implements Callable<Integer> {
 
     @Option(names = {"-f", "--fragment"}, description = "A fragment to prepend to the prompt.")
     private String fragmentName;
+
+    @Option(names = {"-c", "--continue"}, description = "Continue a previous conversation by ID")
+    private String continueConversationId;
+
+    @Option(names = {"--context"}, description = "Number of previous messages to include in context", defaultValue = "10")
+    private int contextMessages = 10;
 
     private final ObjectMapper jsonMapper = new ObjectMapper();
     private final Llm llm;
@@ -107,34 +111,42 @@ public class Cli implements Callable<Integer> {
         LlmResponse llmResponse = chatModel.chat(llmRequest);
         long durationMs = System.currentTimeMillis() - startTime;
         
-        // Log the conversation if logging is enabled
-        if (llm.isLoggingEnabled()) {
-            llm.getLogManager().logConversation(
-                model,
-                finalPrompt,
-                llmResponse.text(),
-                llmResponse.promptTokens(),
-                llmResponse.responseTokens(),
-                llmResponse.totalTokens(),
-                durationMs,
-                schema,
-                tools,
-                null
-            );
-        }
-
-        if (schema != null) {
-            try {
-                Object json = jsonMapper.readValue(llmResponse.text(), Object.class);
-                System.out.println(jsonMapper.writerWithDefaultPrettyPrinter().writeValueAsString(json));
-            } catch (JsonProcessingException e) {
-                System.err.println("Error: The model did not return a valid JSON object.");
-                System.err.println(llmResponse.text());
-                return 1;
-            }
-        } else {
-            System.out.println(llmResponse.text());
-        }
+        // Handle conversation support
+                String conversationId = null;
+                if (llm.isConversationEnabled()) {
+                    if (continueConversationId != null && !continueConversationId.isEmpty()) {
+                        // Continue existing conversation
+                        conversationId = continueConversationId;
+                        llm.getConversationManager().continueConversation(
+                            conversationId, model, finalPrompt, llmResponse.text(),
+                            llmResponse.promptTokens(), llmResponse.responseTokens(), llmResponse.totalTokens(), durationMs
+                        );
+                    } else {
+                        // Start new conversation
+                        conversationId = llm.getConversationManager().startNewConversation(
+                            model, finalPrompt, llmResponse.text(),
+                            llmResponse.promptTokens(), llmResponse.responseTokens(), llmResponse.totalTokens(), durationMs,
+                            schema, tools, null
+                        );
+                    }
+                    System.out.println("Conversation ID: " + conversationId);
+                } else if (llm.isLoggingEnabled()) {
+                    // Legacy logging for backward compatibility
+                    llm.getLogManager().startConversation(
+                        model,
+                        finalPrompt,
+                        llmResponse.text(),
+                        llmResponse.promptTokens(),
+                        llmResponse.responseTokens(),
+                        llmResponse.totalTokens(),
+                        durationMs,
+                        schema,
+                        tools,
+                        null
+                    );
+                }
+                
+                System.out.println(llmResponse.text());
 
         return 0;
     }
@@ -378,8 +390,290 @@ public class Cli implements Callable<Integer> {
                 return (K) new LogCommand.ListCommand(llm);
             } else if (cls == LogCommand.ViewCommand.class) {
                 return (K) new LogCommand.ViewCommand(llm);
+            } else if (cls == ChatCommand.class) {
+                return (K) new ChatCommand(llm);
+            } else if (cls == ChatCommand.StartCommand.class) {
+                return (K) new ChatCommand.StartCommand(llm, templateManager, fragmentManager);
+            } else if (cls == ChatCommand.ContinueCommand.class) {
+                return (K) new ChatCommand.ContinueCommand(llm, templateManager, fragmentManager);
+            } else if (cls == ChatCommand.ListCommand.class) {
+                return (K) new ChatCommand.ListCommand(llm);
             } else {
                 return cls.getDeclaredConstructor().newInstance();
+            }
+        }
+    }
+
+    @Command(name = "chat", description = "Manage conversations with context support.",
+            subcommands = {ChatCommand.StartCommand.class, ChatCommand.ContinueCommand.class, ChatCommand.ListCommand.class})
+    static class ChatCommand {
+        private final Llm llm;
+
+        public ChatCommand(Llm llm) {
+            this.llm = llm;
+        }
+
+        @Command(name = "start", description = "Start a new conversation")
+        static class StartCommand implements Callable<Integer> {
+            @Parameters(index = "0", description = "The prompt to start the conversation")
+            private String prompt;
+
+            @Option(names = {"-m", "--model"}, description = "The model to use", required = true)
+            private String model;
+
+            @Option(names = {"--schema"}, description = "A JSON schema to use for the response")
+            private String schema;
+
+            @Option(names = {"--tool"}, description = "A tool to make available to the model")
+            private String tool;
+
+            @Option(names = {"-t", "--template"}, description = "The template to use")
+            private String templateName;
+
+            @Option(names = {"-p", "--param"}, description = "Parameters for the template", arity = "2", split = ",")
+            private Map<String, String> params = new HashMap<>();
+
+            @Option(names = {"-f", "--fragment"}, description = "A fragment to prepend to the prompt")
+            private String fragmentName;
+
+            private final Llm llm;
+            private final TemplateManager templateManager;
+            private final FragmentManager fragmentManager;
+
+            public StartCommand(Llm llm, TemplateManager templateManager, FragmentManager fragmentManager) {
+                this.llm = llm;
+                this.templateManager = templateManager;
+                this.fragmentManager = fragmentManager;
+            }
+
+            @Override
+            public Integer call() throws Exception {
+                if (!llm.isConversationEnabled()) {
+                    System.err.println("Conversation support is not enabled. Set LLM_LOG_TYPE environment variable to 'jsonl' or 'h2'.");
+                    return 1;
+                }
+
+                LlmChatModel chatModel = llm.getModel(model);
+
+                String finalPrompt = prompt;
+                if (templateName != null) {
+                    try {
+                        Template template = templateManager.loadTemplate(templateName);
+                        finalPrompt = template.render(params);
+                        if (prompt != null) {
+                            finalPrompt = finalPrompt + "\n" + prompt;
+                        }
+                    } catch (FileNotFoundException e) {
+                        System.err.println("Error: " + e.getMessage());
+                        return 1;
+                    }
+                }
+
+                if (fragmentName != null) {
+                    try {
+                        String fragment = fragmentManager.loadFragment(fragmentName);
+                        if (finalPrompt != null) {
+                            finalPrompt = fragment + "\n" + finalPrompt;
+                        } else {
+                            finalPrompt = fragment;
+                        }
+                    } catch (IOException e) {
+                        System.err.println("Error: " + e.getMessage());
+                        return 1;
+                    }
+                }
+
+                List<Object> tools = new ArrayList<>();
+                if (tool != null) {
+                    if ("stringLength".equals(tool)) {
+                        tools.add(new Tools());
+                    } else {
+                        System.err.println("Error: Unknown tool '" + tool + "'");
+                        return 1;
+                    }
+                }
+
+                LlmRequest llmRequest = new LlmRequest(finalPrompt, schema, tools);
+                
+                long startTime = System.currentTimeMillis();
+                LlmResponse llmResponse = chatModel.chat(llmRequest);
+                long durationMs = System.currentTimeMillis() - startTime;
+                
+                String conversationId = llm.getConversationManager().startNewConversation(
+                    model, finalPrompt, llmResponse.text(),
+                    llmResponse.promptTokens(), llmResponse.responseTokens(), llmResponse.totalTokens(), durationMs,
+                    schema, tools, null
+                );
+                
+                System.out.println(llmResponse.text());
+                System.out.println("Conversation ID: " + conversationId);
+                
+                return 0;
+            }
+        }
+
+        @Command(name = "continue", description = "Continue an existing conversation")
+        static class ContinueCommand implements Callable<Integer> {
+            @Parameters(index = "0", description = "The conversation ID to continue")
+            private String conversationId;
+
+            @Parameters(index = "1", description = "The new prompt to add to the conversation")
+            private String newPrompt;
+
+            @Option(names = {"-m", "--model"}, description = "The model to use", required = true)
+            private String model;
+
+            @Option(names = {"--context"}, description = "Number of previous messages to include", defaultValue = "10")
+            private int contextMessages = 10;
+
+            @Option(names = {"--schema"}, description = "A JSON schema to use for the response")
+            private String schema;
+
+            @Option(names = {"--tool"}, description = "A tool to make available to the model")
+            private String tool;
+
+            @Option(names = {"-t", "--template"}, description = "The template to use")
+            private String templateName;
+
+            @Option(names = {"-p", "--param"}, description = "Parameters for the template", arity = "2", split = ",")
+            private Map<String, String> params = new HashMap<>();
+
+            @Option(names = {"-f", "--fragment"}, description = "A fragment to prepend to the prompt")
+            private String fragmentName;
+
+            private final Llm llm;
+            private final TemplateManager templateManager;
+            private final FragmentManager fragmentManager;
+
+            public ContinueCommand(Llm llm, TemplateManager templateManager, FragmentManager fragmentManager) {
+                this.llm = llm;
+                this.templateManager = templateManager;
+                this.fragmentManager = fragmentManager;
+            }
+
+            @Override
+            public Integer call() throws Exception {
+                if (!llm.isConversationEnabled()) {
+                    System.err.println("Conversation support is not enabled. Set LLM_LOG_TYPE environment variable to 'jsonl' or 'h2'.");
+                    return 1;
+                }
+
+                LlmChatModel chatModel = llm.getModel(model);
+
+                // Get conversation context
+                List<String> context = llm.getConversationManager().getConversationContext(conversationId, contextMessages);
+                
+                String finalPrompt = newPrompt;
+                if (templateName != null) {
+                    try {
+                        Template template = templateManager.loadTemplate(templateName);
+                        finalPrompt = template.render(params);
+                        if (newPrompt != null) {
+                            finalPrompt = finalPrompt + "\n" + newPrompt;
+                        }
+                    } catch (FileNotFoundException e) {
+                        System.err.println("Error: " + e.getMessage());
+                        return 1;
+                    }
+                }
+
+                if (fragmentName != null) {
+                    try {
+                        String fragment = fragmentManager.loadFragment(fragmentName);
+                        if (finalPrompt != null) {
+                            finalPrompt = fragment + "\n" + finalPrompt;
+                        } else {
+                            finalPrompt = fragment;
+                        }
+                    } catch (IOException e) {
+                        System.err.println("Error: " + e.getMessage());
+                        return 1;
+                    }
+                }
+
+                // Build context-aware prompt
+                StringBuilder contextBuilder = new StringBuilder();
+                if (!context.isEmpty()) {
+                    contextBuilder.append("Previous conversation:\n");
+                    for (String message : context) {
+                        contextBuilder.append(message).append("\n");
+                    }
+                    contextBuilder.append("\n");
+                }
+                contextBuilder.append("New prompt: ").append(finalPrompt);
+                
+                String contextPrompt = contextBuilder.toString();
+
+                List<Object> tools = new ArrayList<>();
+                if (tool != null) {
+                    if ("stringLength".equals(tool)) {
+                        tools.add(new Tools());
+                    } else {
+                        System.err.println("Error: Unknown tool '" + tool + "'");
+                        return 1;
+                    }
+                }
+
+                LlmRequest llmRequest = new LlmRequest(contextPrompt, schema, tools);
+                
+                long startTime = System.currentTimeMillis();
+                LlmResponse llmResponse = chatModel.chat(llmRequest);
+                long durationMs = System.currentTimeMillis() - startTime;
+                
+                llm.getConversationManager().continueConversation(
+                    conversationId, model, finalPrompt, llmResponse.text(),
+                    llmResponse.promptTokens(), llmResponse.responseTokens(), llmResponse.totalTokens(), durationMs
+                );
+                
+                System.out.println(llmResponse.text());
+                
+                return 0;
+            }
+        }
+
+        @Command(name = "list", description = "List recent conversations")
+        static class ListCommand implements Callable<Integer> {
+            @Option(names = {"-l", "--limit"}, description = "Number of conversations to show", defaultValue = "10")
+            private int limit;
+
+            @Option(names = {"-o", "--offset"}, description = "Number of conversations to skip", defaultValue = "0")
+            private int offset;
+
+            private final Llm llm;
+
+            public ListCommand(Llm llm) {
+                this.llm = llm;
+            }
+
+            @Override
+            public Integer call() {
+                if (!llm.isConversationEnabled()) {
+                    System.err.println("Conversation support is not enabled. Set LLM_LOG_TYPE environment variable to 'jsonl' or 'h2'.");
+                    return 1;
+                }
+
+                List<Conversation> conversations = llm.getConversationManager().getRecentConversations(limit);
+                if (conversations.isEmpty()) {
+                    System.out.println("No conversations found.");
+                    return 0;
+                }
+
+                System.out.printf("%-36s %-20s %-30s %-50s%n", "Conversation ID", "Timestamp", "Model", "Last Message");
+                System.out.println("-".repeat(136));
+                
+                for (Conversation conv : conversations) {
+                    String prompt = conv.getPrompt();
+                    if (prompt.length() > 47) {
+                        prompt = prompt.substring(0, 44) + "...";
+                    }
+                    System.out.printf("%-36s %-20s %-30s %-50s%n", 
+                            conv.getId(), 
+                            conv.getTimestamp().toString().substring(0, 19), 
+                            conv.getModel(), 
+                            prompt);
+                }
+                
+                return 0;
             }
         }
     }

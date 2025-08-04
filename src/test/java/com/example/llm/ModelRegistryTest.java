@@ -14,12 +14,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ModelRegistryTest {
 
     private ModelRegistry modelRegistry;
-    private Config config;
+    private ModelConfig modelConfig;
 
     @BeforeEach
     void setUp() {
         // Provide dummy keys for testing to avoid exceptions
-        config = new Config(Map.of(
+        modelConfig = new ModelConfig(Map.of(
                 "openai.api.key", "dummy-key",
                 "anthropic.api.key", "dummy-key",
                 "azure.openai.api.key", "dummy-key",
@@ -29,7 +29,7 @@ class ModelRegistryTest {
                 "huggingface.api.key", "dummy-key",
                 "openrouter.api.key", "dummy-key"
         ));
-        modelRegistry = new ModelRegistry(config);
+        modelRegistry = new ModelRegistry(modelConfig);
     }
 
     @Test
@@ -47,8 +47,8 @@ class ModelRegistryTest {
     @Test
     void shouldGetOllamaModelWithoutApiKey() {
         // Ollama does not require an API key
-        Config emptyConfig = new Config(Map.of());
-        ModelRegistry registry = new ModelRegistry(emptyConfig);
+        ModelConfig emptyModelConfig = new ModelConfig(Map.of());
+        ModelRegistry registry = new ModelRegistry(emptyModelConfig);
         LlmChatModel model = registry.getModel("ollama", "llama2");
         assertThat(model).isInstanceOf(OllamaChatModelWrapper.class);
     }

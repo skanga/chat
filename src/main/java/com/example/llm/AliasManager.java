@@ -11,7 +11,6 @@ import java.util.HashMap;
 import java.util.Map;
 
 public class AliasManager {
-
     private final File aliasesFile;
     private final ObjectMapper jsonMapper = new ObjectMapper();
 
@@ -33,9 +32,9 @@ public class AliasManager {
         return jsonMapper.readValue(new FileReader(aliasesFile), new TypeReference<Map<String, String>>() {});
     }
 
-    public void saveAliases(Map<String, String> aliases) throws IOException {
+    public void saveAliases(Map<String, String> modelAliases) throws IOException {
         try (FileWriter writer = new FileWriter(aliasesFile)) {
-            jsonMapper.writerWithDefaultPrettyPrinter().writeValue(writer, aliases);
+            jsonMapper.writerWithDefaultPrettyPrinter().writeValue(writer, modelAliases);
         }
     }
 

@@ -4,11 +4,10 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
-public class Config {
-
+public class ModelConfig {
     private final Map<String, String> config = new HashMap<>();
 
-    public Config() {
+    public ModelConfig() {
         // Load from environment variables
         config.put("anthropic.api.key", System.getenv("ANTHROPIC_API_KEY"));
         config.put("azure.openai.api.key", System.getenv("AZURE_OPENAI_API_KEY"));
@@ -28,7 +27,7 @@ public class Config {
     /**
      * Constructor for testing purposes.
      */
-    public Config(Map<String, String> initialConfig) {
+    public ModelConfig(Map<String, String> initialConfig) {
         this.config.putAll(initialConfig);
     }
 

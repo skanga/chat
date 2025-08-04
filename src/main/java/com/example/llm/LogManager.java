@@ -1,6 +1,8 @@
 package com.example.llm;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.*;
@@ -9,30 +11,27 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.*;
 import java.time.Instant;
-import java.util.ArrayList;
-import com.fasterxml.jackson.core.type.TypeReference;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.Properties;
 
 public class LogManager {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final String logType;
     private final String logPath;
-    private Connection connection;
+    private Connection dbConnection;
 
     public LogManager(String logType, String logPath) {
         this.logType = logType;
         this.logPath = logPath;
         
         if ("h2".equalsIgnoreCase(logType)) {
-            initializeH2Database();
+            initializeDatabase();
         } else if ("jsonl".equalsIgnoreCase(logType)) {
             ensureJsonlFileExists();
         }
     }
 
-    private void initializeH2Database() {
+    private void initializeDatabase() {
         try {
             // Explicitly register H2 driver
             Class.forName("org.h2.Driver");
@@ -40,14 +39,14 @@ public class LogManager {
             String dbPath = logPath.endsWith(".db") ? logPath : logPath + ".db";
             String jdbcUrl = "jdbc:h2:file:" + dbPath + ";AUTO_SERVER=TRUE";
             
-            Properties props = new Properties();
-            props.setProperty("user", "sa");
-            props.setProperty("password", "");
+            Properties dbProps = new Properties();
+            dbProps.setProperty("user", "sa");
+            dbProps.setProperty("password", "");
             
-            connection = DriverManager.getConnection(jdbcUrl, props);
+            dbConnection = DriverManager.getConnection(jdbcUrl, dbProps);
             
-            // Create table if it doesn't exist
-            String createTableSQL = """
+            // Create tables if they don't exist
+            String createConversationsTableSQL = """
                 CREATE TABLE IF NOT EXISTS conversations (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -64,8 +63,20 @@ public class LogManager {
                 )
             """;
             
-            try (Statement stmt = connection.createStatement()) {
-                stmt.execute(createTableSQL);
+            String createMessagesTableSQL = """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    conversation_id BIGINT NOT NULL,
+                    role VARCHAR(20) NOT NULL,
+                    content TEXT NOT NULL,
+                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+                )
+            """;
+            
+            try (Statement connectionStatement = dbConnection.createStatement()) {
+                connectionStatement.execute(createConversationsTableSQL);
+                connectionStatement.execute(createMessagesTableSQL);
             }
         } catch (ClassNotFoundException e) {
             throw new RuntimeException("H2 JDBC driver not found. Please ensure H2 dependency is included.", e);
@@ -88,77 +99,246 @@ public class LogManager {
         }
     }
 
-    public void logConversation(String model, String prompt, String response, 
-                              Integer promptTokens, Integer responseTokens, Integer totalTokens,
-                              Long durationMs, String schema, List<Object> tools, Map<String, Object> metadata) {
+    public String startConversation(String model, String initialPrompt, String response, 
+                                  Integer promptTokens, Integer responseTokens, Integer totalTokens,
+                                  Long durationMs, String schema, List<Object> tools, Map<String, Object> metadata) {
+        
+        String conversationId = UUID.randomUUID().toString();
         
         if ("h2".equalsIgnoreCase(logType)) {
-            logToH2(model, prompt, response, promptTokens, responseTokens, totalTokens, 
-                   durationMs, schema, tools, metadata);
+            return startConversationInH2(conversationId, model, initialPrompt, response, promptTokens, responseTokens, totalTokens, durationMs, schema, tools, metadata);
         } else {
-            logToJsonl(model, prompt, response, promptTokens, responseTokens, totalTokens,
-                      durationMs, schema, tools, metadata);
+            return startConversationInJsonl(conversationId, model, initialPrompt, response, promptTokens, responseTokens, totalTokens, durationMs, schema, tools, metadata);
         }
     }
 
-    private void logToH2(String model, String prompt, String response, 
-                        Integer promptTokens, Integer responseTokens, Integer totalTokens,
-                        Long durationMs, String schema, List<Object> tools, Map<String, Object> metadata) {
+    private String startConversationInH2(String conversationId, String model, String initialPrompt, String response, 
+                                       Integer promptTokens, Integer responseTokens, Integer totalTokens,
+                                       Long durationMs, String schema, List<Object> tools, Map<String, Object> metadata) {
         
-        String sql = """
-            INSERT INTO conversations (model, prompt, response, prompt_tokens, response_tokens, 
-                                       total_tokens, duration_ms, schema, tools, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """;
-        
-        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
-            pstmt.setString(1, model);
-            pstmt.setString(2, prompt);
-            pstmt.setString(3, response);
-            setNullableInt(pstmt, 4, promptTokens);
-            setNullableInt(pstmt, 5, responseTokens);
-            setNullableInt(pstmt, 6, totalTokens);
-            setNullableLong(pstmt, 7, durationMs);
-            pstmt.setString(8, schema);
-            pstmt.setString(9, tools != null ? objectMapper.writeValueAsString(tools) : null);
-            pstmt.setString(10, metadata != null ? objectMapper.writeValueAsString(metadata) : null);
+        try {
+            // Insert conversation
+            String conversationSQL = """
+                INSERT INTO conversations (id, model, prompt, response, prompt_tokens, response_tokens, 
+                                         total_tokens, duration_ms, schema, tools, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """;
             
-            pstmt.executeUpdate();
+            try (PreparedStatement pstmt = dbConnection.prepareStatement(conversationSQL)) {
+                pstmt.setString(1, conversationId);
+                pstmt.setString(2, model);
+                pstmt.setString(3, initialPrompt);
+                pstmt.setString(4, response);
+                setNullableInt(pstmt, 5, promptTokens);
+                setNullableInt(pstmt, 6, responseTokens);
+                setNullableInt(pstmt, 7, totalTokens);
+                setNullableLong(pstmt, 8, durationMs);
+                pstmt.setString(9, schema);
+                pstmt.setString(10, tools != null ? objectMapper.writeValueAsString(tools) : null);
+                pstmt.setString(11, metadata != null ? objectMapper.writeValueAsString(metadata) : null);
+                pstmt.executeUpdate();
+            }
+            
+            // Insert messages
+            String messageSQL = "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)";
+            try (PreparedStatement pstmt = dbConnection.prepareStatement(messageSQL)) {
+                pstmt.setString(1, conversationId);
+                pstmt.setString(2, "user");
+                pstmt.setString(3, initialPrompt);
+                pstmt.executeUpdate();
+                
+                pstmt.setString(2, "assistant");
+                pstmt.setString(3, response);
+                pstmt.executeUpdate();
+            }
+            
+            return conversationId;
         } catch (SQLException | IOException e) {
-            throw new RuntimeException("Failed to log to H2 database", e);
+            throw new RuntimeException("Failed to start conversation in H2", e);
         }
     }
 
-    private void logToJsonl(String model, String prompt, String response, 
-                           Integer promptTokens, Integer responseTokens, Integer totalTokens,
-                           Long durationMs, String schema, List<Object> tools, Map<String, Object> metadata) {
+    private String startConversationInJsonl(String conversationId, String model, String initialPrompt, String response, 
+                                        Integer promptTokens, Integer responseTokens, Integer totalTokens,
+                                        Long durationMs, String schema, List<Object> tools, Map<String, Object> metadata) {
         
         try (FileWriter fw = new FileWriter(logPath, true);
              BufferedWriter bw = new BufferedWriter(fw);
              PrintWriter out = new PrintWriter(bw)) {
             
-            ObjectNode logEntry = objectMapper.createObjectNode();
-            logEntry.put("id", System.currentTimeMillis());
-            logEntry.put("timestamp", Instant.now().toString());
-            logEntry.put("model", model);
-            logEntry.put("prompt", prompt);
-            logEntry.put("response", response);
+            ObjectNode conversationEntry = objectMapper.createObjectNode();
+            conversationEntry.put("id", conversationId);
+            conversationEntry.put("timestamp", Instant.now().toString());
+            conversationEntry.put("model", model);
+            conversationEntry.put("type", "conversation");
             
-            if (promptTokens != null) logEntry.put("prompt_tokens", promptTokens);
-            if (responseTokens != null) logEntry.put("response_tokens", responseTokens);
-            if (totalTokens != null) logEntry.put("total_tokens", totalTokens);
-            if (durationMs != null) logEntry.put("duration_ms", durationMs);
-            if (schema != null) logEntry.put("schema", schema);
-            if (tools != null) {
-                logEntry.set("tools", objectMapper.valueToTree(tools));
-            }
-            if (metadata != null) {
-                logEntry.set("metadata", objectMapper.valueToTree(metadata));
-            }
+            ArrayNode messages = objectMapper.createArrayNode();
             
-            out.println(objectMapper.writeValueAsString(logEntry));
+            ObjectNode userMessage = objectMapper.createObjectNode();
+            userMessage.put("role", "user");
+            userMessage.put("content", initialPrompt);
+            messages.add(userMessage);
+            
+            ObjectNode assistantMessage = objectMapper.createObjectNode();
+            assistantMessage.put("role", "assistant");
+            assistantMessage.put("content", response);
+            messages.add(assistantMessage);
+            
+            conversationEntry.set("messages", messages);
+            
+            if (promptTokens != null) conversationEntry.put("prompt_tokens", promptTokens);
+            if (responseTokens != null) conversationEntry.put("response_tokens", responseTokens);
+            if (totalTokens != null) conversationEntry.put("total_tokens", totalTokens);
+            if (durationMs != null) conversationEntry.put("duration_ms", durationMs);
+            if (schema != null) conversationEntry.put("schema", schema);
+            if (tools != null) conversationEntry.set("tools", objectMapper.valueToTree(tools));
+            if (metadata != null) conversationEntry.set("metadata", objectMapper.valueToTree(metadata));
+            
+            out.println(objectMapper.writeValueAsString(conversationEntry));
+            return conversationId;
         } catch (IOException e) {
-            throw new RuntimeException("Failed to log to JSONL file", e);
+            throw new RuntimeException("Failed to start conversation in JSONL", e);
+        }
+    }
+
+    public void continueConversation(String conversationId, String newPrompt, String newResponse, 
+                                 Integer promptTokens, Integer responseTokens, Integer totalTokens,
+                                 Long durationMs) {
+        
+        if ("h2".equalsIgnoreCase(logType)) {
+            continueConversationInH2(conversationId, newPrompt, newResponse, promptTokens, responseTokens, totalTokens, durationMs);
+        } else {
+            continueConversationInJsonl(conversationId, newPrompt, newResponse, promptTokens, responseTokens, totalTokens, durationMs);
+        }
+    }
+
+    private void continueConversationInH2(String conversationId, String newPrompt, String newResponse, 
+                                      Integer promptTokens, Integer responseTokens, Integer totalTokens,
+                                      Long durationMs) {
+        
+        try {
+            String messageSQL = "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)";
+            try (PreparedStatement pstmt = dbConnection.prepareStatement(messageSQL)) {
+                pstmt.setString(1, conversationId);
+                pstmt.setString(2, "user");
+                pstmt.setString(3, newPrompt);
+                pstmt.executeUpdate();
+                
+                pstmt.setString(2, "assistant");
+                pstmt.setString(3, newResponse);
+                pstmt.executeUpdate();
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to continue conversation in H2", e);
+        }
+    }
+
+    private void continueConversationInJsonl(String conversationId, String newPrompt, String newResponse, 
+                                           Integer promptTokens, Integer responseTokens, Integer totalTokens,
+                                           Long durationMs) {
+        
+        try (FileWriter fw = new FileWriter(logPath, true);
+             BufferedWriter bw = new BufferedWriter(fw);
+             PrintWriter out = new PrintWriter(bw)) {
+            
+            ObjectNode messageEntry = objectMapper.createObjectNode();
+            messageEntry.put("conversation_id", conversationId);
+            messageEntry.put("timestamp", Instant.now().toString());
+            messageEntry.put("type", "message");
+            
+            ArrayNode messages = objectMapper.createArrayNode();
+            
+            ObjectNode userMessage = objectMapper.createObjectNode();
+            userMessage.put("role", "user");
+            userMessage.put("content", newPrompt);
+            messages.add(userMessage);
+            
+            ObjectNode assistantMessage = objectMapper.createObjectNode();
+            assistantMessage.put("role", "assistant");
+            assistantMessage.put("content", newResponse);
+            messages.add(assistantMessage);
+            
+            messageEntry.set("messages", messages);
+            
+            if (promptTokens != null) messageEntry.put("prompt_tokens", promptTokens);
+            if (responseTokens != null) messageEntry.put("response_tokens", responseTokens);
+            if (totalTokens != null) messageEntry.put("total_tokens", totalTokens);
+            if (durationMs != null) messageEntry.put("duration_ms", durationMs);
+            
+            out.println(objectMapper.writeValueAsString(messageEntry));
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to continue conversation in JSONL", e);
+        }
+    }
+
+    public List<String> getConversationHistory(String conversationId, int limit) {
+        if ("h2".equalsIgnoreCase(logType)) {
+            return getConversationHistoryFromH2(conversationId, limit);
+        } else {
+            return getConversationHistoryFromJsonl(conversationId, limit);
+        }
+    }
+
+    private List<String> getConversationHistoryFromH2(String conversationId, int limit) {
+        List<String> history = new ArrayList<>();
+        
+        String sql = """
+            SELECT role, content FROM messages 
+            WHERE conversation_id = ? 
+            ORDER BY timestamp ASC 
+            LIMIT ?
+        """;
+        
+        try (PreparedStatement pstmt = dbConnection.prepareStatement(sql)) {
+            pstmt.setString(1, conversationId);
+            pstmt.setInt(2, limit);
+            
+            try (ResultSet rs = pstmt.executeQuery()) {
+                while (rs.next()) {
+                    String role = rs.getString("role");
+                    String content = rs.getString("content");
+                    history.add(role + ": " + content);
+                }
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException("Failed to get conversation history from H2", e);
+        }
+        
+        return history;
+    }
+
+    private List<String> getConversationHistoryFromJsonl(String conversationId, int limit) {
+        List<String> history = new ArrayList<>();
+        
+        try {
+            List<String> lines = Files.readAllLines(Paths.get(logPath));
+            List<String> conversationLines = new ArrayList<>();
+            
+            // Find all lines for this conversation
+            for (String line : lines) {
+                if (!line.trim().isEmpty()) {
+                    ObjectNode node = objectMapper.readValue(line, ObjectNode.class);
+                    if (node.has("conversation_id") && node.get("conversation_id").asText().equals(conversationId)) {
+                        conversationLines.add(line);
+                    }
+                }
+            }
+            
+            // Process the conversation
+            for (String line : conversationLines) {
+                ObjectNode node = objectMapper.readValue(line, ObjectNode.class);
+                if (node.has("messages")) {
+                    for (Object message : objectMapper.convertValue(node.get("messages"), new TypeReference<List<Map<String, String>>>() {})) {
+                        Map<String, String> msg = (Map<String, String>) message;
+                        history.add(msg.get("role") + ": " + msg.get("content"));
+                    }
+                }
+            }
+            
+            // Limit the history
+            return history.size() > limit ? history.subList(history.size() - limit, history.size()) : history;
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to get conversation history from JSONL", e);
         }
     }
 
@@ -180,7 +360,7 @@ public class LogManager {
             LIMIT ? OFFSET ?
         """;
         
-        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+        try (PreparedStatement pstmt = dbConnection.prepareStatement(sql)) {
             pstmt.setInt(1, limit);
             pstmt.setInt(2, offset);
             
@@ -208,7 +388,40 @@ public class LogManager {
                 String line = lines.get(i);
                 if (!line.trim().isEmpty()) {
                     ObjectNode node = objectMapper.readValue(line, ObjectNode.class);
-                    conversations.add(mapJsonNodeToConversation(node));
+                    
+                    Conversation conv = new Conversation();
+                    
+                    // Handle both new format (with type=conversation) and legacy format
+                    if (node.has("type") && "conversation".equals(node.get("type").asText())) {
+                        conv.setId(node.get("id").asLong());
+                        conv.setTimestamp(Instant.parse(node.get("timestamp").asText()));
+                        conv.setModel(node.get("model").asText());
+                        conv.setPrompt("Conversation started");
+                        conv.setResponse("Conversation initialized");
+                        
+                        if (node.has("prompt_tokens")) conv.setPromptTokens(node.get("prompt_tokens").asInt());
+                        if (node.has("response_tokens")) conv.setResponseTokens(node.get("response_tokens").asInt());
+                        if (node.has("total_tokens")) conv.setTotalTokens(node.get("total_tokens").asInt());
+                        if (node.has("duration_ms")) conv.setDurationMs(node.get("duration_ms").asLong());
+                        if (node.has("schema")) conv.setSchema(node.get("schema").asText());
+                    } else if (node.has("model") && node.has("prompt") && node.has("response")) {
+                        // Legacy format from logConversation
+                        conv.setId(0); // Legacy entries don't have IDs
+                        conv.setTimestamp(Instant.parse(node.get("timestamp").asText()));
+                        conv.setModel(node.get("model").asText());
+                        conv.setPrompt(node.get("prompt").asText());
+                        conv.setResponse(node.get("response").asText());
+                        
+                        if (node.has("prompt_tokens")) conv.setPromptTokens(node.get("prompt_tokens").asInt());
+                        if (node.has("response_tokens")) conv.setResponseTokens(node.get("response_tokens").asInt());
+                        if (node.has("total_tokens")) conv.setTotalTokens(node.get("total_tokens").asInt());
+                        if (node.has("duration_ms")) conv.setDurationMs(node.get("duration_ms").asLong());
+                        if (node.has("schema")) conv.setSchema(node.get("schema").asText());
+                    } else {
+                        continue; // Skip unrecognized formats
+                    }
+                    
+                    conversations.add(conv);
                 }
             }
         } catch (IOException e) {
@@ -234,7 +447,7 @@ public class LogManager {
             WHERE id = ?
         """;
         
-        try (PreparedStatement pstmt = connection.prepareStatement(sql)) {
+        try (PreparedStatement pstmt = dbConnection.prepareStatement(sql)) {
             pstmt.setLong(1, id);
             
             try (ResultSet rs = pstmt.executeQuery()) {
@@ -255,8 +468,15 @@ public class LogManager {
             for (String line : lines) {
                 if (!line.trim().isEmpty()) {
                     ObjectNode node = objectMapper.readValue(line, ObjectNode.class);
-                    if (node.get("id").asLong() == id) {
-                        return mapJsonNodeToConversation(node);
+                    if (node.has("type") && "conversation".equals(node.get("type").asText()) && 
+                        node.get("id").asLong() == id) {
+                        Conversation conv = new Conversation();
+                        conv.setId(node.get("id").asLong());
+                        conv.setTimestamp(Instant.parse(node.get("timestamp").asText()));
+                        conv.setModel(node.get("model").asText());
+                        conv.setPrompt("Conversation");
+                        conv.setResponse("Details available");
+                        return conv;
                     }
                 }
             }
@@ -281,36 +501,13 @@ public class LogManager {
         conv.setSchema(rs.getString("schema"));
         
         String toolsJson = rs.getString("tools");
-            if (toolsJson != null) {
-                conv.setTools(objectMapper.readValue(toolsJson, new TypeReference<List<Object>>() {}));
-            }
-            
-            String metadataJson = rs.getString("metadata");
-            if (metadataJson != null) {
-                conv.setMetadata(objectMapper.readValue(metadataJson, new TypeReference<Map<String, Object>>() {}));
-            }
-        
-        return conv;
-    }
-
-    private Conversation mapJsonNodeToConversation(ObjectNode node) throws IOException {
-        Conversation conv = new Conversation();
-        conv.setId(node.get("id").asLong());
-        conv.setTimestamp(Instant.parse(node.get("timestamp").asText()));
-        conv.setModel(node.get("model").asText());
-        conv.setPrompt(node.get("prompt").asText());
-        conv.setResponse(node.get("response").asText());
-        
-        if (node.has("prompt_tokens")) conv.setPromptTokens(node.get("prompt_tokens").asInt());
-        if (node.has("response_tokens")) conv.setResponseTokens(node.get("response_tokens").asInt());
-        if (node.has("total_tokens")) conv.setTotalTokens(node.get("total_tokens").asInt());
-        if (node.has("duration_ms")) conv.setDurationMs(node.get("duration_ms").asLong());
-        if (node.has("schema")) conv.setSchema(node.get("schema").asText());
-        if (node.has("tools")) {
-            conv.setTools(objectMapper.convertValue(node.get("tools"), new TypeReference<List<Object>>() {}));
+        if (toolsJson != null) {
+            conv.setTools(objectMapper.readValue(toolsJson, new TypeReference<List<Object>>() {}));
         }
-        if (node.has("metadata")) {
-            conv.setMetadata(objectMapper.convertValue(node.get("metadata"), new TypeReference<Map<String, Object>>() {}));
+        
+        String metadataJson = rs.getString("metadata");
+        if (metadataJson != null) {
+            conv.setMetadata(objectMapper.readValue(metadataJson, new TypeReference<Map<String, Object>>() {}));
         }
         
         return conv;
@@ -342,10 +539,85 @@ public class LogManager {
         return rs.wasNull() ? null : value;
     }
 
+    // Backward compatibility method for legacy code
+    public void logConversation(String model, String prompt, String response, 
+                              Integer promptTokens, Integer responseTokens, Integer totalTokens,
+                              Long durationMs, String schema, List<Object> tools, Map<String, Object> metadata) {
+        if ("h2".equalsIgnoreCase(logType)) {
+            logConversationToH2(model, prompt, response, promptTokens, responseTokens, totalTokens, durationMs, schema, tools, metadata);
+        } else {
+            logConversationToJsonl(model, prompt, response, promptTokens, responseTokens, totalTokens, durationMs, schema, tools, metadata);
+        }
+    }
+
+    // Overloaded method for backward compatibility with nullable parameters
+    public void logConversation(String model, String prompt, String response, 
+                              Integer promptTokens, Integer responseTokens, Integer totalTokens,
+                              Long durationMs, String schema, List<Object> tools, Object ignored) {
+        logConversation(model, prompt, response, promptTokens, responseTokens, totalTokens, durationMs, schema, tools, null);
+    }
+
+    private void logConversationToJsonl(String model, String prompt, String response, 
+                                    Integer promptTokens, Integer responseTokens, Integer totalTokens,
+                                    Long durationMs, String schema, List<Object> tools, Map<String, Object> metadata) {
+        
+        try (FileWriter fw = new FileWriter(logPath, true);
+             BufferedWriter bw = new BufferedWriter(fw);
+             PrintWriter out = new PrintWriter(bw)) {
+            
+            ObjectNode entry = objectMapper.createObjectNode();
+            entry.put("timestamp", Instant.now().toString());
+            entry.put("model", model);
+            entry.put("prompt", prompt);
+            entry.put("response", response);
+            
+            if (promptTokens != null) entry.put("prompt_tokens", promptTokens);
+            if (responseTokens != null) entry.put("response_tokens", responseTokens);
+            if (totalTokens != null) entry.put("total_tokens", totalTokens);
+            if (durationMs != null) entry.put("duration_ms", durationMs);
+            if (schema != null) entry.put("schema", schema);
+            if (tools != null) entry.set("tools", objectMapper.valueToTree(tools));
+            if (metadata != null) entry.set("metadata", objectMapper.valueToTree(metadata));
+            
+            out.println(objectMapper.writeValueAsString(entry));
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to log conversation to JSONL", e);
+        }
+    }
+
+    private void logConversationToH2(String model, String prompt, String response, 
+                                   Integer promptTokens, Integer responseTokens, Integer totalTokens,
+                                   Long durationMs, String schema, List<Object> tools, Map<String, Object> metadata) {
+        try {
+            // Insert conversation without specifying ID (auto-generated)
+            String conversationSQL = """
+                INSERT INTO conversations (model, prompt, response, prompt_tokens, response_tokens, 
+                                         total_tokens, duration_ms, schema, tools, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """;
+            
+            try (PreparedStatement pstmt = dbConnection.prepareStatement(conversationSQL, Statement.RETURN_GENERATED_KEYS)) {
+                pstmt.setString(1, model);
+                pstmt.setString(2, prompt);
+                pstmt.setString(3, response);
+                setNullableInt(pstmt, 4, promptTokens);
+                setNullableInt(pstmt, 5, responseTokens);
+                setNullableInt(pstmt, 6, totalTokens);
+                setNullableLong(pstmt, 7, durationMs);
+                pstmt.setString(8, schema);
+                pstmt.setString(9, tools != null ? objectMapper.writeValueAsString(tools) : null);
+                pstmt.setString(10, metadata != null ? objectMapper.writeValueAsString(metadata) : null);
+                pstmt.executeUpdate();
+            }
+        } catch (SQLException | IOException e) {
+            throw new RuntimeException("Failed to log conversation to H2", e);
+        }
+    }
+
     public void close() {
-        if (connection != null) {
+        if (dbConnection != null) {
             try {
-                connection.close();
+                dbConnection.close();
             } catch (SQLException e) {
                 throw new RuntimeException("Failed to close H2 connection", e);
             }
