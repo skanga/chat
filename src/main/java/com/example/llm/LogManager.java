@@ -119,7 +119,7 @@ public class LogManager {
         try {
             // Insert conversation
             String conversationSQL = """
-                INSERT INTO conversations (id, model, prompt, response, prompt_tokens, response_tokens, 
+                INSERT INTO conversations (id, model, prompt, response, prompt_tokens, response_tokens,
                                          total_tokens, duration_ms, schema, tools, metadata)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """;
@@ -283,9 +283,9 @@ public class LogManager {
         List<String> history = new ArrayList<>();
         
         String sql = """
-            SELECT role, content FROM messages 
-            WHERE conversation_id = ? 
-            ORDER BY timestamp ASC 
+            SELECT role, content FROM messages
+            WHERE conversation_id = ?
+            ORDER BY timestamp ASC
             LIMIT ?
         """;
         
@@ -328,8 +328,8 @@ public class LogManager {
             for (String line : conversationLines) {
                 ObjectNode node = objectMapper.readValue(line, ObjectNode.class);
                 if (node.has("messages")) {
-                    for (Object message : objectMapper.convertValue(node.get("messages"), new TypeReference<List<Map<String, String>>>() {})) {
-                        Map<String, String> msg = (Map<String, String>) message;
+                    List<Map<String, String>> messages = objectMapper.convertValue(node.get("messages"), new TypeReference<List<Map<String, String>>>() {});
+                    for (Map<String, String> msg : messages) {
                         history.add(msg.get("role") + ": " + msg.get("content"));
                     }
                 }
